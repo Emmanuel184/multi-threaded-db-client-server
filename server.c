@@ -8,6 +8,11 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+
+#include "msg.h"
 
 typedef struct studentRecord
 {
@@ -16,13 +21,21 @@ typedef struct studentRecord
   int32_t index; // index of this record in the data base file
 } sr;
 
+typedef struct argsForThread
+{
+  int cFd;
+  struct sockaddr_storage *addrStruct;
+  socklen_t caddrLen;
+  int sockFamily;
+  int32_t fileToReadSlashWriteFrom;
+} aFP;
+
 void Usage(char *progname);
 void PrintOut(int fd, struct sockaddr *addr, size_t addrlen);
 void PrintReverseDNS(struct sockaddr *addr, size_t addrlen);
 void PrintServerSide(int client_fd, int sock_family);
 int Listen(char *portnum, int *sock_family);
-void HandleClient(int c_fd, struct sockaddr *addr, size_t addrlen,
-                  int sock_family);
+void HandleClient(void *args);
 void put(int32_t fd);
 void get(int32_t fd);
 
@@ -60,10 +73,16 @@ int main(int argc, char **argv)
       break;
     }
 
-    HandleClient(client_fd,
-                 (struct sockaddr *)(&caddr),
-                 caddr_len,
-                 sock_family);
+    pthread_t threadFd;
+
+    aFP argsForThreadVar;
+
+    argsForThreadVar.cFd = client_fd;
+    argsForThreadVar.caddrLen = (struct sockaddre *)(&caddr);
+    argsForThreadVar.caddrLen = caddr_len;
+    argsForThreadVar.sockFamily = sock_family;
+
+    pthread_create(threadFd, NULL, HandleClient, (void *)&argsForThreadVar);
   }
 
   // Close socket
@@ -71,10 +90,9 @@ int main(int argc, char **argv)
   return EXIT_SUCCESS;
 }
 
-void 
+void
 
-    
-    put(int32_t fd)
+put(int32_t fd)
 {
   sr s;
 
@@ -92,7 +110,7 @@ void
 
   scanf("%d", &s.index);
 
-  lseek(fd, size(sr) * s.index, SEEK_SET);
+  lseek(fd, sizeof(sr) * s.index, SEEK_SET);
 
   write(fd, &s, sizeof(sr));
 }
@@ -228,21 +246,31 @@ int Listen(char *portnum, int *sock_family)
   return listen_fd;
 }
 
-void HandleClient(int c_fd, struct sockaddr *addr, size_t addrlen,
-                  int sock_family)
+void HandleClient(void *args)
 {
+
+  aFP *arg = (aFP *)args;
+
+  aFP argsValue = *arg;
+
+  argsValue.fileToReadSlashWriteFrom = open("recordDataBase", O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
+
   // Print out information about the client.
   printf("\nNew client connection \n");
-  PrintOut(c_fd, addr, addrlen);
-  PrintReverseDNS(addr, addrlen);
-  PrintServerSide(c_fd, sock_family);
+  PrintOut(argsValue.cFd, argsValue.addrStruct, argsValue.caddrLen);
+  PrintOut(argsValue.cFd, argsValue.addrStruct, argsValue.caddrLen);
+  PrintReverseDNS(argsValue.addrStruct, argsValue.caddrLen);
+  PrintServerSide(argsValue.cFd, argsValue.sockFamily);
 
   // Loop, reading data and echo'ing it back, until the client
   // closes the connection.
   while (1)
   {
-    char clientbuf[1024];
-    ssize_t res = read(c_fd, clientbuf, 1023);
+
+    struct msg msgBuf;
+
+    struct msg msgToRead;
+    ssize_t res = read(argsValue.cFd, &msgToRead, sizeof(struct msg));
     if (res == 0)
     {
       printf("[The client disconnected.] \n");
@@ -257,16 +285,49 @@ void HandleClient(int c_fd, struct sockaddr *addr, size_t addrlen,
       printf(" Error on client socket:%d \n ", strerror(errno));
       break;
     }
-    clientbuf[res] = '\0';
-    printf("the client sent: %s \n", clientbuf);
+    struct record recordByClient = msgToRead.rd;
+
+    switch (msgToRead.type)
+    {
+    case 1:
+
+      lseek(argsValue.fileToReadSlashWriteFrom, sizeof(struct record), SEEK_END);
+      if(write(argsValue.fileToReadSlashWriteFrom, &recordByClient, sizeof(struct record)) == -1) {
+        msgBuf.type = 5;
+      }
+      write(argsValue.cFd, &msgBuf, sizeof(struct msg));
+      break;
+    case 2:
+
+      msgBuf.type = 5;
+
+      int recordID = recordByClient.id;
+      struct stat st;
+      fstat("recordDataBase", &st);
+
+      for (off_t i = 0; i < st.st_size; i += sizeof(struct record))
+      {
+        struct record tempRecord;
+        read(argsValue.fileToReadSlashWriteFrom, &tempRecord, sizeof(struct record));
+        if (tempRecord.id == recordByClient.id)
+        {
+          msgBuf.rd.id = tempRecord.id;
+          strcpy(msgBuf.rd.name, tempRecord.name);
+          msgBuf.type = 4;
+          write(argsValue.cFd, &msgBuf, sizeof(struct msg));
+          break;
+        }
+      }
+      write(argsValue.cFd, &msgBuf, sizeof(struct msg));
+    }
 
     // Really should do this in a loop in case of EAGAIN, EINTR,
     // or short write, but I'm lazy.  Don't be like me. ;)
-    write(c_fd, "You typed: ", strlen("You typed: "));
-    write(c_fd, clientbuf, strlen(clientbuf));
+    // write(argsValue.cFd, "You typed: ", strlen("You typed: "));
+    // write(argsValue.cFd, clientbuf, strlen(clientbuf));
   }
 
-  close(c_fd);
+  close(argsValue.cFd);
 }
 void PrintOut(int fd, struct sockaddr *addr, size_t addrlen)
 {
